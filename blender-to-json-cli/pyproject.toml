@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "blender-to-json"
+version = "0.1.0"
+authors = [
+  { name="Nate Laffan", email="nate.laffan@gmail.com" },
+]
+description = "Render Blender collections and objects as game assets with a JSON manifest."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "Pillow",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Multimedia :: Graphics :: 3D Rendering",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+blender-to-json = "blender_to_json.cli:main"
+
+[project.urls]
+Repository = "https://github.com/laffan/blender-to-json"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

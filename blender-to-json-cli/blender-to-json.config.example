@@ -1,0 +1,21 @@
+{
+  "output_dir": "assets",
+  "blend_files": ["scenes/level1.blend", "scenes/level2.blend"],
+  "blender_path": null,
+
+  "camera": "@mainCam",
+  "renderBounds": "object",
+  "renderPadding": 2,
+
+  "tile_slice_size": 512,
+  "tile_scaled_versions": [128],
+  "pngQualityRange": { "low": 85, "high": 90 },
+  "jpgQuality": 80,
+
+  "ignoreLayers": ["debugOnly"],
+  "generateOnSave": false,
+
+  "parameters": {
+    "difficulty": 2
+  }
+}

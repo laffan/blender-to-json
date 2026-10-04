@@ -1,0 +1,17 @@
+schema_version = "1.0.0"
+
+id = "blender_to_json"
+version = "0.1.0"
+name = "Blender to JSON"
+tagline = "Named parameters for the blender-to-json command-line exporter"
+maintainer = "Nate Laffan <nate.laffan@gmail.com>"
+type = "add-on"
+website = "https://github.com/laffan/blender-to-json"
+tags = ["Import-Export", "Game Engine"]
+
+blender_version_min = "4.2.0"
+
+license = ["SPDX:GPL-3.0-or-later"]
+
+[permissions]
+clipboard = "Copy parameter references and CLI commands"
