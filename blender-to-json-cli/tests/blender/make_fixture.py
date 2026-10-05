@@ -109,12 +109,20 @@ def build(path, camera_type='ORTHO'):
     # Ignored (no pipes)
     cube('helper', (0, 4, 0), 1, root)
 
+    # Reference tile for baseTile/tileWidth/snapToTileGrid (2x2 units, unnamed).
+    bpy.ops.mesh.primitive_plane_add(size=2, location=(0, 0, -0.5))
+    tile = bpy.context.active_object
+    tile.name = 'BaseTile'
+    link(tile, root)
+
     scene['blender_to_json'] = json.dumps({
-        'version': 1,
+        'version': 2,
         'parameters': {
-            'mainCam': {'type': 'CAMERA', 'value': 'Camera'},
-            'difficulty': {'type': 'INT', 'value': 3},
-            'tileSize': {'type': 'INT', 'value': 64},
+            'mainCam': {'id_type': 'scenes', 'id_name': 'Scene', 'path': 'camera', 'value': 'Camera'},
+            'width': {'id_type': 'scenes', 'id_name': 'Scene', 'path': 'render.resolution_x', 'value': 200},
+            'sunPower': {'id_type': 'lights', 'id_name': 'Sun', 'path': 'energy', 'value': 1.0},
+            'difficulty': {'value': 3},
+            'tileSize': {'value': 64},
         },
     })
 

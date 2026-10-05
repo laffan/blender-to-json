@@ -23,7 +23,8 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest"]
+psd = ["psd-tools>=1.10"]
+test = ["pytest", "psd-tools>=1.10"]
 
 [project.scripts]
 blender-to-json = "blender_to_json.cli:main"

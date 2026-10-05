@@ -20,14 +20,20 @@ class Projector:
     orthographic cameras.
     """
 
-    def __init__(self, scene, camera_obj):
+    def __init__(self, scene, camera_obj, scale=1.0):
         cam = camera_obj.data
         if cam.type == 'PANO':
             raise ValueError(f"Camera '{camera_obj.name}' is panoramic; only perspective "
                              "and orthographic cameras are supported.")
         self.camera_obj = camera_obj
         self.ortho = cam.type == 'ORTHO'
-        self.width, self.height = render_resolution(scene)
+        base_width, base_height = render_resolution(scene)
+        # `scale` resizes the whole export (used to make the base tile exactly
+        # `tileWidth` pixels wide) without rounding the pixel density.
+        self.scale = scale
+        self.width = round(base_width * scale)
+        self.height = round(base_height * scale)
+        self._width_f = base_width * scale
         self.inverse = camera_obj.matrix_world.normalized().inverted()
 
         # view_frame() accounts for sensor fit, shift and aspect. Corners are in
@@ -41,7 +47,7 @@ class Projector:
         self.min_y, self.max_y = min(ys), max(ys)
         # Size of one pixel on the frame plane (world units for ortho, units at
         # depth 1 for perspective).
-        self.pixel_size = (self.max_x - self.min_x) / self.width
+        self.pixel_size = (self.max_x - self.min_x) / self._width_f
 
     def project(self, world_co):
         """Return (x, y, depth). x/y are None if the point is behind the camera."""
@@ -53,8 +59,8 @@ class Projector:
             if depth <= 1e-9:
                 return None, None, depth
             fx, fy = local.x / depth, local.y / depth
-        x = (fx - self.min_x) / (self.max_x - self.min_x) * self.width
-        y = (self.max_y - fy) / (self.max_y - self.min_y) * self.height
+        x = (fx - self.min_x) / self.pixel_size
+        y = (self.max_y - fy) / self.pixel_size
         return x, y, depth
 
     def project_many(self, world_coords):

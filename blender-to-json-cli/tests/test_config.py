@@ -10,10 +10,11 @@ def test_precedence(tmp_path):
     path.write_text(json.dumps({
         'output_dir': 'assets', 'tile_slice_size': 256, 'parameters': {'a': 1},
         'pngQualityRange': {'low': 80, 'high': 90}}))
-    config, base_dir = load_config(str(path), sets=['tile_slice_size=128', 'camera=@top',
+    config, base_dir, explicit = load_config(str(path), sets=['tile_slice_size=128', 'camera=@top',
                                                     'pngQualityRange.low=70'],
                                    params=['a=2', 'b="x"'])
     assert base_dir == str(tmp_path)
+    assert explicit == {'output_dir', 'tile_slice_size', 'parameters', 'pngQualityRange', 'camera'}
     assert config['output_dir'] == 'assets'
     assert config['tile_slice_size'] == 128
     assert config['camera'] == '@top'

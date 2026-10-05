@@ -1,4 +1,4 @@
-from blender_to_json.naming import parse_layer_name, parse_value, strip_numeric_suffix
+from blender_to_json.core.naming import parse_layer_name, parse_value, strip_numeric_suffix
 
 
 def test_ignored_names():

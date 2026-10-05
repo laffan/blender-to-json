@@ -2,7 +2,7 @@
 
     blender -b scene.blend --python-exit-code 1 --python entry.py -- job.json
 
-The job file names a mode ("export" or "list-params"), the config, parameter
+The job file names a mode ("export", "dryrun" or "list-params"), the config, parameter
 overrides and the path where the result JSON should be written.
 """
 

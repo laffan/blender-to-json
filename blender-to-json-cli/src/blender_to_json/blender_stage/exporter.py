@@ -1,25 +1,24 @@
-"""Scene traversal, isolated renders and projection. Runs inside Blender.
+"""Isolated renders and projection, driven by the shared plan. Runs inside Blender.
 
 Produces `raw.json` plus untrimmed renders in a work directory; the
 post-processing stage (system Python + Pillow) turns those into the final
 assets and `data.json`.
 """
 
-import json
 import os
 from collections import defaultdict
 
 import bpy
 from mathutils import Vector
 
-from ..geometry import bounds, convex_hull
-from ..naming import parse_layer_name
-from .parameters import ParameterError, merge_parameters, read_scene_parameters, resolve_references
-from .projection import CameraRegion, Projector, pixel_region, render_resolution
+from ..core import plan as planner
+from ..core.geometry import bounds, convex_hull
+from ..core.parameters import (ParameterError, apply_parameters, read_scene_parameters, read_scene_settings,
+                               resolve_references)
+from .projection import CameraRegion, Projector, pixel_region
 
-NON_RENDERABLE_TYPES = {'LIGHT', 'CAMERA', 'LIGHT_PROBE', 'LIGHTPROBE', 'SPEAKER'}
+NON_RENDERABLE_TYPES = planner.NON_RENDERABLE_TYPES
 MESH_CONVERTIBLE_TYPES = {'MESH', 'CURVE', 'SURFACE', 'FONT', 'META', 'CURVES', 'POINTCLOUD'}
-PLUGIN_PROPERTY_KEYS = {'blender_to_json', 'cycles', '_RNA_UI'}
 
 
 class ExportError(Exception):
@@ -34,81 +33,29 @@ def _xyd(x, y, depth):
     return {'x': _round(x), 'y': _round(y), 'depth': _round(depth, 4)}
 
 
-def _jsonable(value):
-    if hasattr(value, 'to_dict'):
-        value = value.to_dict()
-    elif hasattr(value, 'to_list'):
-        value = value.to_list()
-    try:
-        json.dumps(value)
-    except (TypeError, ValueError):
-        return None
-    return value
+class Geometry:
+    """World-space geometry lookups backed by the evaluated depsgraph."""
 
-
-class Exporter:
-    def __init__(self, scene, camera_obj, config, params, work_dir):
-        self.scene = scene
-        self.config = config
-        self.params = params
-        self.work_dir = work_dir
-        self.render_dir = os.path.join(work_dir, 'renders')
-        self.warnings = []
-        self.render_count = 0
-
-        self.projector = Projector(scene, camera_obj)
-        self.metadata_only = bool(config.get('metadataOnly'))
-        self.render_bounds = config.get('renderBounds', 'object')
-        if self.render_bounds not in ('object', 'frame'):
-            raise ExportError(f"renderBounds must be 'object' or 'frame', got {self.render_bounds!r}")
-        self.padding = int(config.get('renderPadding', 2))
-        self.max_render_size = int(config.get('maxRenderSize', 16384))
-        self.ignore = set(config.get('ignoreLayers', []))
-        self.pass_through = bool(config.get('passThroughUnnamedCollections', False))
-        self.use_custom_props = bool(config.get('customPropertiesAsAttributes', True))
-        self.cast_shadows = bool(config.get('castShadowsFromHidden', False))
-
-        render = scene.render
-        if abs(render.pixel_aspect_x - render.pixel_aspect_y) > 1e-6:
-            self.warn('non-square pixel aspect is not supported; positions will be distorted')
-
-        if scene == bpy.context.scene:
-            self.depsgraph = bpy.context.evaluated_depsgraph_get()
-        else:
-            self.depsgraph = scene.view_layers[0].depsgraph
-            self.depsgraph.update()
-        self._corners = self._index_bound_box_corners()
-
-    def warn(self, message):
-        print(f"[blender-to-json] WARNING: {message}")
-        self.warnings.append(message)
-
-    # ------------------------------------------------------------------ geometry
-
-    def _index_bound_box_corners(self):
-        """Map original object pointer -> world-space bounding-box corners.
-
-        Instances (collection instances, geometry-node instances, particles)
-        are attributed to the object that instances them.
-        """
-        index = defaultdict(list)
-        self._directly_visible = set()
-        for inst in self.depsgraph.object_instances:
+    def __init__(self, depsgraph):
+        self.depsgraph = depsgraph
+        self.corners = defaultdict(list)
+        self.directly_visible = set()
+        # Instances (collection instances, geometry-node instances, particles)
+        # are attributed to the object that instances them.
+        for inst in depsgraph.object_instances:
             owner = inst.parent if inst.is_instance else inst.object
             if owner is None:
                 continue
             if not inst.is_instance:
-                self._directly_visible.add(owner.original.as_pointer())
+                self.directly_visible.add(owner.original.as_pointer())
             obj = inst.object
             if obj.type in NON_RENDERABLE_TYPES:
                 continue
             matrix = inst.matrix_world
-            corners = [matrix @ Vector(c) for c in obj.bound_box]
-            index[owner.original.as_pointer()].extend(corners)
-        return index
+            self.corners[owner.original.as_pointer()].extend(matrix @ Vector(c) for c in obj.bound_box)
 
-    def _object_corners(self, obj):
-        corners = self._corners.get(obj.as_pointer())
+    def object_corners(self, obj):
+        corners = self.corners.get(obj.as_pointer())
         if corners:
             return corners
         if obj.type in NON_RENDERABLE_TYPES:
@@ -116,9 +63,15 @@ class Exporter:
         # Not in the evaluated depsgraph (e.g. disabled in viewports).
         return [obj.matrix_world @ Vector(c) for c in obj.bound_box]
 
-    def _object_vertices(self, obj):
-        """World-space vertex positions of an object's evaluated geometry,
-        including anything it instances. Falls back to the origin."""
+    def corners_for(self, objects):
+        corners = []
+        for obj in objects:
+            corners.extend(self.object_corners(obj))
+        return corners
+
+    def object_vertices(self, obj):
+        """World-space vertices of an object's evaluated geometry, including
+        anything it instances. Falls back to the origin."""
         pointer = obj.as_pointer()
         verts = []
         found = False
@@ -127,33 +80,57 @@ class Exporter:
             if owner is None or owner.original.as_pointer() != pointer:
                 continue
             found = True
-            verts.extend(self._evaluated_vertices(inst.object, inst.matrix_world))
+            verts.extend(_evaluated_vertices(inst.object, inst.matrix_world))
         if not found and obj.type == 'MESH':
             verts.extend(obj.matrix_world @ v.co for v in obj.data.vertices)
         if not verts:
             verts.append(obj.matrix_world.translation.copy())
         return verts
 
-    @staticmethod
-    def _evaluated_vertices(eval_obj, matrix):
-        if eval_obj.type not in MESH_CONVERTIBLE_TYPES:
-            return [matrix.translation.copy()]
-        if eval_obj.type == 'MESH':
-            return [matrix @ v.co for v in eval_obj.data.vertices]
-        try:
-            mesh = eval_obj.to_mesh()
-        except RuntimeError:
-            return [matrix.translation.copy()]
-        try:
-            return [matrix @ v.co for v in mesh.vertices] if mesh else []
-        finally:
-            eval_obj.to_mesh_clear()
 
-    def _corners_for(self, objects):
-        corners = []
-        for obj in objects:
-            corners.extend(self._object_corners(obj))
-        return corners
+def _evaluated_vertices(eval_obj, matrix):
+    if eval_obj.type not in MESH_CONVERTIBLE_TYPES:
+        return [matrix.translation.copy()]
+    if eval_obj.type == 'MESH':
+        return [matrix @ v.co for v in eval_obj.data.vertices]
+    try:
+        mesh = eval_obj.to_mesh()
+    except RuntimeError:
+        return [matrix.translation.copy()]
+    try:
+        return [matrix @ v.co for v in mesh.vertices] if mesh else []
+    finally:
+        eval_obj.to_mesh_clear()
+
+
+class Exporter:
+    def __init__(self, scene, projector, geometry, config, params, work_dir, holdout=None, dryrun=False):
+        self.scene = scene
+        self.projector = projector
+        self.geometry = geometry
+        self.config = config
+        self.params = params
+        self.work_dir = work_dir
+        self.render_dir = os.path.join(work_dir, 'renders')
+        self.holdout = holdout
+        self.dryrun = dryrun
+        self.warnings = []
+        self.render_count = 0
+
+        self.metadata_only = dryrun or bool(config.get('metadataOnly'))
+        self.render_bounds = config.get('renderBounds', 'object')
+        if self.render_bounds not in ('object', 'frame'):
+            raise ExportError(f"renderBounds must be 'object' or 'frame', got {self.render_bounds!r}")
+        self.padding = int(config.get('renderPadding', 2))
+        self.max_render_size = int(config.get('maxRenderSize', 16384))
+        self.cast_shadows = bool(config.get('castShadowsFromHidden', False))
+        self._holdout_objects = {o.as_pointer() for o in holdout.all_objects} if holdout else set()
+
+    def warn(self, message):
+        print(f"[blender-to-json] WARNING: {message}")
+        self.warnings.append(message)
+
+    # ------------------------------------------------------------------ geometry
 
     def _anchor(self, kind, item, corners):
         """Projected anchor: the origin for objects, the bounding-box centre
@@ -167,204 +144,155 @@ class Exporter:
         else:
             return None
         x, y, depth = self.projector.project(co)
-        if x is None:
-            return None
-        return x, y, depth
+        return None if x is None else (x, y, depth)
 
-    def _projected_bounds(self, corners, label):
+    def _add_geometry_info(self, node, kind, item, objects):
+        corners = self.geometry.corners_for(objects)
+        anchor = self._anchor(kind, item, corners)
+        node['origin'] = _xyd(*anchor) if anchor else None
         projected = self.projector.project_many(corners)
         if len(projected) < len(corners):
-            self.warn(f"'{label}' is partly behind the camera; its bounds are approximate")
+            self.warn(f"'{item.name}' is partly behind the camera; its bounds are approximate")
         if not projected:
-            return None, None
+            node['bounds'] = node['depthRange'] = None
+            return None
         box = bounds(projected)
         depths = [p[2] for p in projected]
-        return box, (min(depths), max(depths))
+        node['bounds'] = {'left': _round(box[0]), 'top': _round(box[1]),
+                          'right': _round(box[2]), 'bottom': _round(box[3])}
+        node['depthRange'] = {'near': _round(min(depths), 4), 'far': _round(max(depths), 4)}
+        return box
 
-    # ------------------------------------------------------------------ traversal
+    # ------------------------------------------------------------------ plan -> nodes
 
-    def _children(self, collection):
-        items = [('collection', c) for c in collection.children]
-        items += [('object', o) for o in collection.objects]
-        return items
+    def emit(self, plan_nodes):
+        out = []
+        for p in plan_nodes:
+            if p.warning and p.status != planner.EXPORT:
+                self.warn(f"'{p.blender_name}': {p.warning}; skipped")
+            if p.status == planner.HOIST and not self.dryrun:
+                out.extend(self.emit(p.children))
+                continue
+            if p.status == planner.CONTENT and not self.dryrun:
+                # Already in the parent's render; named layers inside still count.
+                out.extend(self.emit(p.children))
+                continue
+            if p.status != planner.EXPORT:
+                if self.dryrun:
+                    out.append(self._skipped_node(p))
+                continue
+            if p.warning:
+                self.warn(f"'{p.blender_name}': {p.warning}")
+            node = self._build(p)
+            if node is not None:
+                out.append(node)
+        return out
 
-    def _parse(self, item):
-        parsed = parse_layer_name(item.name)
-        if parsed is None or parsed['name'] in self.ignore:
-            return None
-        attributes = {}
-        if self.use_custom_props:
-            for key in item.keys():
-                if key.startswith('_') or key in PLUGIN_PROPERTY_KEYS:
-                    continue
-                value = _jsonable(item[key])
-                if value is not None:
-                    attributes[key] = value
-        attributes.update(parsed['attributes'])
+    def _skipped_node(self, p):
+        node = p.to_dict()
+        node.pop('children', None)
+        node.pop('frames', None)
+        if p.children:
+            node['children'] = self.emit(p.children)
+        return node
+
+    def _resolve_attributes(self, p):
         try:
-            parsed['attributes'] = resolve_references(attributes, self.params, f"'{item.name}' attributes")
+            return resolve_references(p.attributes, self.params, f"'{p.blender_name}' attributes")
         except ParameterError as e:
             self.warn(str(e))
-            parsed['attributes'] = attributes
-        return parsed
+            return p.attributes
 
-    def walk(self, collection):
-        nodes = []
-        for kind, item in self._children(collection):
-            parsed = self._parse(item)
-            if parsed is None:
-                if kind == 'collection' and self.pass_through:
-                    nodes.extend(self.walk(item))
-                continue
-            node = self._build(kind, item, parsed)
-            if node is not None:
-                nodes.append(node)
-        return nodes
-
-    def _build(self, kind, item, parsed):
-        category = parsed['category']
+    def _build(self, p):
         node = {
-            'name': parsed['name'],
-            'category': category,
-            'attributes': parsed['attributes'],
-            'source': {'kind': kind, 'name': item.name},
+            'name': p.name,
+            'category': p.category,
+            'attributes': self._resolve_attributes(p),
+            'source': {'kind': p.kind, 'name': p.blender_name},
         }
-        if 'type' in parsed:
-            node['type'] = parsed['type']
-        if kind == 'object':
-            node['source']['objectType'] = item.type
+        if p.type:
+            node['type'] = p.type
+        if p.kind == 'object':
+            node['source']['objectType'] = p.item.type
+        if p.only_root:
+            node['onlyRoot'] = True
+        if p.holdout:
+            node['holdout'] = True
+        if self.dryrun:
+            node['status'] = planner.EXPORT
 
         builder = {
             'group': self._build_group,
             'point': self._build_point,
             'zone': self._build_zone,
             'sprite': self._build_sprite,
-            'tileset': self._build_tileset,
-        }[category]
-        return builder(kind, item, node)
+            'tileset': self._build_rendered,
+        }[p.category]
+        return builder(p, node)
 
-    def _add_geometry_info(self, node, kind, item, objects):
-        corners = self._corners_for(objects)
-        anchor = self._anchor(kind, item, corners)
-        node['origin'] = _xyd(*anchor) if anchor else None
-        box, depth_range = self._projected_bounds(corners, item.name)
-        node['bounds'] = None if box is None else {
-            'left': _round(box[0]), 'top': _round(box[1]),
-            'right': _round(box[2]), 'bottom': _round(box[3]),
-        }
-        node['depthRange'] = None if depth_range is None else {
-            'near': _round(depth_range[0], 4), 'far': _round(depth_range[1], 4),
-        }
-        return box
-
-    def _build_group(self, kind, item, node):
-        if kind != 'collection':
-            self.warn(f"'{item.name}': G must be a collection; skipped")
-            return None
-        self._add_geometry_info(node, kind, item, self._render_objects(item))
-        node['children'] = self.walk(item)
+    def _build_group(self, p, node):
+        self._add_geometry_info(node, p.kind, p.item, planner.render_objects(p.kind, p.item))
+        node['children'] = self.emit(p.children)
         return node
 
-    def _build_point(self, kind, item, node):
-        if kind != 'object':
-            self.warn(f"'{item.name}': P must be a single object (empty or mesh); skipped")
-            return None
-        x, y, depth = self.projector.project(item.matrix_world.translation)
+    def _build_point(self, p, node):
+        x, y, depth = self.projector.project(p.item.matrix_world.translation)
         if x is None:
-            self.warn(f"point '{item.name}' is behind the camera; skipped")
+            self.warn(f"point '{p.blender_name}' is behind the camera; skipped")
             return None
         node['origin'] = _xyd(x, y, depth)
         return node
 
-    def _build_zone(self, kind, item, node):
-        objects = [item] if kind == 'object' else list(item.all_objects)
+    def _build_zone(self, p, node):
+        objects = [p.item] if p.kind == 'object' else list(p.item.all_objects)
         verts = []
         for obj in objects:
-            verts.extend(self._object_vertices(obj))
+            verts.extend(self.geometry.object_vertices(obj))
         projected = self.projector.project_many(verts)
         if len(projected) < len(verts):
-            self.warn(f"zone '{item.name}' is partly behind the camera; hidden vertices ignored")
+            self.warn(f"zone '{p.blender_name}' is partly behind the camera; hidden vertices ignored")
         if not projected:
-            self.warn(f"zone '{item.name}' has no vertices in front of the camera; skipped")
+            self.warn(f"zone '{p.blender_name}' has no vertices in front of the camera; skipped")
             return None
         hull = convex_hull([(_round(x), _round(y), depth) for x, y, depth in projected])
         node['points'] = [{'x': x, 'y': y, 'depth': _round(d, 4)} for x, y, d in hull]
-        depths = [p[2] for p in projected]
+        depths = [pt[2] for pt in projected]
         node['depthRange'] = {'near': _round(min(depths), 4), 'far': _round(max(depths), 4)}
-        anchor = self._anchor(kind, item, verts) if kind == 'collection' else \
-            self.projector.project(item.matrix_world.translation)
-        node['origin'] = _xyd(*anchor) if anchor and anchor[0] is not None else None
+        anchor = self._anchor(p.kind, p.item, verts)
+        node['origin'] = _xyd(*anchor) if anchor else None
         return node
 
-    def _build_sprite(self, kind, item, node):
-        sprite_type = node.get('type', 'basic')
-        if sprite_type in ('atlas', 'spritesheet'):
-            if kind != 'collection':
-                self.warn(f"'{item.name}': {sprite_type} sprites must be collections; skipped")
-                return None
-            self._add_geometry_info(node, kind, item, self._render_objects(item))
-            node['frames'] = self._build_frames(item)
+    def _build_sprite(self, p, node):
+        if p.type in ('atlas', 'spritesheet'):
+            self._add_geometry_info(node, p.kind, p.item, planner.render_objects(p.kind, p.item))
+            node['frames'] = [self._build_frame(f) for f in p.frames]
             return node
-        if sprite_type == 'animation':
-            self.warn(f"'{item.name}': animation sprites are not supported yet; exported without image")
-            self._add_geometry_info(node, kind, item, self._render_objects_for(kind, item))
+        if p.type == 'animation':
+            self._add_geometry_info(node, p.kind, p.item, planner.render_objects(p.kind, p.item))
             return node
-        return self._build_rendered(kind, item, node)
+        return self._build_rendered(p, node)
 
-    def _build_tileset(self, kind, item, node):
-        return self._build_rendered(kind, item, node)
-
-    def _build_rendered(self, kind, item, node):
-        objects = self._render_objects_for(kind, item)
-        box = self._add_geometry_info(node, kind, item, objects)
-        node['render'] = self._render(objects, box, item.name)
-        if kind == 'collection':
-            children = self.walk(item)
-            if children:
-                node['children'] = children
+    def _build_rendered(self, p, node):
+        objects = planner.render_objects(p.kind, p.item)
+        box = self._add_geometry_info(node, p.kind, p.item, objects)
+        node['render'] = self._render(objects, box, p.blender_name)
+        children = self.emit(p.children)
+        if children:
+            node['children'] = children
         return node
 
-    def _build_frames(self, collection):
-        frames = []
-        for kind, child in self._children(collection):
-            parsed = parse_layer_name(child.name)
-            if parsed is not None and parsed['category'] in ('point', 'zone'):
-                continue
-            if parsed is not None and parsed['name'] in self.ignore:
-                continue
-            frame = {
-                'name': parsed['name'] if parsed else child.name,
-                'attributes': parsed['attributes'] if parsed else {},
-                'source': {'kind': kind, 'name': child.name},
-            }
-            objects = self._render_objects_for(kind, child)
-            box = self._add_geometry_info(frame, kind, child, objects)
-            frame['render'] = self._render(objects, box, child.name)
-            frames.append(frame)
-        return frames
+    def _build_frame(self, f):
+        frame = {
+            'name': f.name,
+            'attributes': self._resolve_attributes(f),
+            'source': {'kind': f.kind, 'name': f.blender_name},
+        }
+        objects = planner.render_objects(f.kind, f.item)
+        box = self._add_geometry_info(frame, f.kind, f.item, objects)
+        frame['render'] = self._render(objects, box, f.blender_name)
+        return frame
 
     # ------------------------------------------------------------------ rendering
-
-    def _render_objects(self, collection):
-        """All objects a collection contributes to a render: everything inside
-        it except points/zones (and anything inside P/Z collections)."""
-        excluded = set()
-        for sub in collection.children_recursive:
-            parsed = parse_layer_name(sub.name)
-            if parsed and parsed['category'] in ('point', 'zone'):
-                excluded.update(o.as_pointer() for o in sub.all_objects)
-        result = []
-        for obj in collection.all_objects:
-            parsed = parse_layer_name(obj.name)
-            if parsed and parsed['category'] in ('point', 'zone'):
-                continue
-            if obj.as_pointer() in excluded or obj.type in NON_RENDERABLE_TYPES:
-                continue
-            result.append(obj)
-        return result
-
-    def _render_objects_for(self, kind, item):
-        return [item] if kind == 'object' else self._render_objects(item)
 
     def _render(self, objects, box, label):
         if not objects or box is None:
@@ -382,7 +310,8 @@ class Exporter:
             return None
 
         left, top, right, bottom = region
-        info = {'left': left, 'top': top, 'width': right - left, 'height': bottom - top}
+        info = {'left': left, 'top': top, 'width': right - left, 'height': bottom - top,
+                'objects': len(objects)}
         if self.metadata_only:
             return info
 
@@ -395,7 +324,7 @@ class Exporter:
         # Hiding an instanced collection's objects also hides the instances,
         # so those sources have to stay visible.
         sources = self._instance_sources(objects) - targets
-        shown = sources & self._directly_visible
+        shown = sources & self.geometry.directly_visible
         if shown:
             names = ', '.join(sorted(o.name for o in self.scene.objects if o.as_pointer() in shown))
             self.warn(f"'{label}' instances objects that are also visible in the scene ({names}); "
@@ -415,7 +344,7 @@ class Exporter:
     def _instance_sources(objects):
         sources = set()
         seen = set()
-        stack = [o for o in objects]
+        stack = list(objects)
         while stack:
             obj = stack.pop()
             col = obj.instance_collection if obj.instance_type == 'COLLECTION' else None
@@ -432,21 +361,27 @@ class Exporter:
         for obj in self.scene.objects:
             if obj.type in NON_RENDERABLE_TYPES:
                 continue
-            saved[obj.name] = (obj.hide_render, obj.visible_camera)
-            if obj.as_pointer() in targets:
+            saved[obj.name] = (obj.hide_render, obj.visible_camera, obj.is_holdout)
+            pointer = obj.as_pointer()
+            if pointer in targets:
                 continue  # keep the user's own visibility settings
-            if self.cast_shadows:
+            if pointer in self._holdout_objects:
+                # Ground objects cut away whatever is behind/below them.
+                obj.is_holdout = True
+                obj.visible_camera = True
+            elif self.cast_shadows:
                 obj.visible_camera = False
             else:
                 obj.hide_render = True
         return saved
 
     def _restore(self, saved):
-        for name, (hide_render, visible_camera) in saved.items():
+        for name, (hide_render, visible_camera, is_holdout) in saved.items():
             obj = self.scene.objects.get(name)
             if obj is not None:
                 obj.hide_render = hide_render
                 obj.visible_camera = visible_camera
+                obj.is_holdout = is_holdout
 
     # ------------------------------------------------------------------ output
 
@@ -469,8 +404,12 @@ class Exporter:
             info['lens'] = _round(cam.lens, 4)
             info['sensorWidth'] = _round(cam.sensor_width, 4)
             info['fieldOfView'] = _round(cam.angle, 6)
+        if self.projector.scale != 1:
+            info['scale'] = _round(self.projector.scale, 6)
         return info
 
+
+# ---------------------------------------------------------------------- job setup
 
 def _pick_scene(name):
     if not name:
@@ -481,15 +420,22 @@ def _pick_scene(name):
     return scene
 
 
-def _pick_camera(scene, name):
-    if name:
-        obj = bpy.data.objects.get(name)
-        if obj is None or obj.type != 'CAMERA':
-            raise ExportError(f"camera '{name}' not found (or is not a camera)")
-        return obj
-    if scene.camera is None:
-        raise ExportError(f"scene '{scene.name}' has no active camera")
-    return scene.camera
+def _pick_object(name, label, camera=False):
+    if not name:
+        return None
+    obj = bpy.data.objects.get(name)
+    if obj is None or (camera and obj.type != 'CAMERA'):
+        raise ExportError(f"{label} '{name}' not found" + (' (or is not a camera)' if camera else ''))
+    return obj
+
+
+def _pick_collection(name, label):
+    if not name:
+        return None
+    col = bpy.data.collections.get(name)
+    if col is None:
+        raise ExportError(f"{label} collection '{name}' not found")
+    return col
 
 
 def _apply_render_settings(scene, config):
@@ -515,51 +461,136 @@ def _apply_render_settings(scene, config):
     settings.color_depth = '8'
 
 
+def merge_blend_settings(config, settings, explicit):
+    """Layer the plugin's stored settings under the config file and --set.
+
+    Precedence: defaults < blend settings < config file < --set.
+    ignoreLayers lists are combined rather than replaced.
+    """
+    config = dict(config)
+    for key, value in settings.items():
+        if key == 'ignoreLayers':
+            config[key] = list(dict.fromkeys(list(config.get(key) or []) + list(value or [])))
+        elif key not in explicit:
+            config[key] = value
+    if isinstance(config.get('output_dir'), str) and config['output_dir'].startswith('//') \
+            and 'output_dir' not in explicit:
+        config['output_dir'] = bpy.path.abspath(config['output_dir'])
+    return config
+
+
 def resolve_job(job):
-    """Resolve the scene, parameters and config for a job."""
+    """Resolve the scene, parameters and config for a job.
+
+    Returns (scene, params, config, problems).
+    """
     config = dict(job.get('config', {}))
+    config.pop('parameters', None)  # passed separately as job['parameters']
     scene_name = config.get('scene')
     if isinstance(scene_name, str) and scene_name.startswith('@'):
         # A scene reference can only be resolved against the active scene.
-        scene_name = resolve_references(scene_name, merge_parameters(
-            read_scene_parameters(bpy.context.scene), job.get('parameters')), 'scene')
+        values, _ = apply_parameters(read_scene_parameters(bpy.context.scene), {})
+        scene_name = resolve_references(scene_name, values, 'scene')
     scene = _pick_scene(scene_name)
-    params = merge_parameters(read_scene_parameters(scene), job.get('parameters'))
-    config.pop('parameters', None)  # merged into job['parameters'] by the CLI
-    resolved = resolve_references(config, params)
-    return scene, params, resolved
+
+    config = merge_blend_settings(config, read_scene_settings(scene), set(job.get('explicit', ())))
+    params, problems = apply_parameters(read_scene_parameters(scene), job.get('parameters'))
+    config = resolve_references(config, params)
+    return scene, params, config, problems
 
 
 def list_parameters(job):
     scene = _pick_scene(job.get('config', {}).get('scene'))
-    return {
-        'scene': scene.name,
-        'parameters': read_scene_parameters(scene),
+    entries = read_scene_parameters(scene)
+    values, problems = apply_parameters(entries, {})
+    for name, entry in entries.items():
+        entry['value'] = values.get(name)
+    return {'scene': scene.name, 'parameters': entries, 'settings': read_scene_settings(scene),
+            'warnings': problems}
+
+
+def _depsgraph(scene):
+    if scene == bpy.context.scene:
+        return bpy.context.evaluated_depsgraph_get()
+    depsgraph = scene.view_layers[0].depsgraph
+    depsgraph.update()
+    return depsgraph
+
+
+def _base_tile_info(scene, camera_obj, geometry, config):
+    """Measure the base tile and work out the export scale.
+
+    Returns (scale, info) where info describes the base tile in final pixels.
+    """
+    base = _pick_object(config.get('baseTile'), 'base tile')
+    if base is None:
+        if config.get('tileWidth') or config.get('snapToTileGrid'):
+            raise ExportError('tileWidth and snapToTileGrid need a baseTile object')
+        return 1.0, None
+    unscaled = Projector(scene, camera_obj)
+    projected = unscaled.project_many(geometry.object_vertices(base))
+    box = bounds(projected)
+    if box is None or box[2] - box[0] <= 0:
+        raise ExportError(f"base tile '{base.name}' has no visible width from the camera")
+    tile_width = config.get('tileWidth')
+    scale = float(tile_width) / (box[2] - box[0]) if tile_width else 1.0
+
+    ox, oy, _ = unscaled.project(base.matrix_world.translation)
+    info = {
+        'name': base.name,
+        'width': _round((box[2] - box[0]) * scale, 3),
+        'height': _round((box[3] - box[1]) * scale, 3),
+        'originX': _round((ox - box[0]) * scale, 3),
+        'originY': _round((oy - box[1]) * scale, 3),
     }
+    return scale, info
 
 
 def export(job):
     work_dir = job['work_dir']
+    dryrun = job.get('mode') == 'dryrun'
     os.makedirs(os.path.join(work_dir, 'renders'), exist_ok=True)
 
-    scene, params, config = resolve_job(job)
-    camera_obj = _pick_camera(scene, config.get('camera'))
+    scene, params, config, problems = resolve_job(job)
+    camera_obj = _pick_object(config.get('camera'), 'camera', camera=True) or scene.camera
+    if camera_obj is None:
+        raise ExportError(f"scene '{scene.name}' has no active camera")
     scene.camera = camera_obj
     _apply_render_settings(scene, config)
+    holdout = _pick_collection(config.get('holdoutCollection'), 'holdout')
 
-    exporter = Exporter(scene, camera_obj, config, params, work_dir)
-    layers = exporter.walk(scene.collection)
-    width, height = render_resolution(scene)
+    geometry = Geometry(_depsgraph(scene))
+    scale, base_tile = _base_tile_info(scene, camera_obj, geometry, config)
+    projector = Projector(scene, camera_obj, scale)
+    if abs(scene.render.pixel_aspect_x - scene.render.pixel_aspect_y) > 1e-6:
+        problems.append('non-square pixel aspect is not supported; positions will be distorted')
 
-    return {
-        'name': job['name'],
+    options = planner.PlanOptions.from_config(config, holdout)
+    plan = planner.build_plan(scene.collection, options)
+    for name in sorted(options.only - options.only_matched):
+        problems.append(f"--only '{name}' didn't match any collection or object")
+
+    exporter = Exporter(scene, projector, geometry, config, params, work_dir, holdout, dryrun)
+    for message in problems:
+        exporter.warn(message)
+    layers = exporter.emit(plan)
+
+    result = {
+        'name': str(config.get('name') or job['name']),
         'source': bpy.data.filepath,
         'scene': scene.name,
-        'width': width,
-        'height': height,
+        'width': projector.width,
+        'height': projector.height,
         'camera': exporter.camera_info(),
         'config': config,
         'parameters': params,
         'layers': layers,
         'warnings': exporter.warnings,
     }
+    if base_tile:
+        result['baseTile'] = base_tile
+    if config.get('only'):
+        result['only'] = list(config['only'])
+    if dryrun:
+        result['summary'] = planner.summarize(plan)
+    return result

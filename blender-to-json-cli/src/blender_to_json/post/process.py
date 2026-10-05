@@ -23,6 +23,9 @@ class PostProcessor:
         self.metadata_only = bool(self.config.get('metadataOnly'))
         self.trim = self.config.get('trimTransparent', True)
         self.warnings = list(raw.get('warnings', []))
+        self.base_tile = raw.get('baseTile')
+        self.snap = bool(self.config.get('snapToTileGrid')) and self.base_tile is not None
+        self.images = {}  # id(layer) -> PIL image, for PSD output
 
     def warn(self, message):
         print(f"[blender-to-json] WARNING: {message}")
@@ -43,6 +46,7 @@ class PostProcessor:
             'height': self.raw['height'],
             'camera': self.raw['camera'],
             'tile_slice_size': int(self.config.get('tile_slice_size', 512)),
+            **({'baseTile': self.base_tile} if self.base_tile else {}),
             'tile_scaled_versions': self.config.get('tile_scaled_versions', []) or [],
             'parameters': self.raw.get('parameters', {}),
             'layers': layers,
@@ -54,8 +58,13 @@ class PostProcessor:
     # ------------------------------------------------------------------ layers
 
     def _layer(self, node):
+        if node.get('status', 'export') != 'export':
+            return None
         category = node['category']
         layer = {'name': node['name'], 'category': category}
+        for flag in ('onlyRoot', 'holdout'):
+            if node.get(flag):
+                layer[flag] = True
         if node.get('type'):
             layer['type'] = node['type']
 
@@ -151,15 +160,43 @@ class PostProcessor:
         else:
             self._rect_from_bounds(layer, node.get('bounds'))
 
+    def _snap(self, image, x, y, width, height, origin):
+        """Grow a sprite's rectangle outward to the base-tile grid anchored
+        at its origin (blender-2d-tile-tools' tile alignment)."""
+        if not self.snap or origin is None or x is None:
+            return image, x, y
+        cell_w = max(1, round(self.base_tile['width']))
+        cell_h = max(1, round(self.base_tile['height']))
+        gx = round(origin['x'] - self.base_tile['originX'])
+        gy = round(origin['y'] - self.base_tile['originY'])
+        left = gx + math.floor((x - gx) / cell_w) * cell_w
+        top = gy + math.floor((y - gy) / cell_h) * cell_h
+        right = gx + math.ceil((x + width - gx) / cell_w) * cell_w
+        bottom = gy + math.ceil((y + height - gy) / cell_h) * cell_h
+        if image is not None:
+            canvas = Image.new('RGBA', (right - left, bottom - top), (0, 0, 0, 0))
+            canvas.paste(image, (x - left, y - top))
+            image = canvas
+        else:
+            self._snapped_size = (right - left, bottom - top)
+        return image, left, top
+
     def _basic(self, node, layer):
         image, x, y = self._placed_image(node, node['source']['name'])
+        if self.snap and image is not None:
+            image, x, y = self._snap(image, x, y, image.width, image.height, node.get('origin'))
         self._apply_rect(layer, node, image, x, y)
+        if self.snap and image is None and 'x' in layer:
+            _, layer['x'], layer['y'] = self._snap(None, layer['x'], layer['y'], layer['width'],
+                                                  layer['height'], node.get('origin'))
+            layer['width'], layer['height'] = self._snapped_size
         if node.get('origin'):
             layer['origin'] = node['origin']
         if image is not None:
             rel = f"sprites/{node['name']}.png"
             save_png(image, os.path.join(self.layer_dir, rel), self.config)
             layer['filePath'] = rel
+            self.images[id(layer)] = image
         return layer
 
     def _tileset(self, node, layer):
@@ -172,6 +209,8 @@ class PostProcessor:
         if image is None:
             return layer
         layer.update(slice_tiles(image, node['name'], self.layer_dir, self.config, use_jpg))
+        if not self.metadata_only:
+            self.images[id(layer)] = image
         return layer
 
     def _collect_frames(self, node):
@@ -190,11 +229,15 @@ class PostProcessor:
                     continue
                 x, y = math.floor(bounds.get('left', 0)), math.floor(bounds.get('top', 0))
             else:
+                if self.snap:
+                    image, x, y = self._snap(image, x, y, image.width, image.height, frame.get('origin'))
                 width, height = image.width, image.height
             if frame['name'] not in unique:
                 unique[frame['name']] = {'name': frame['name'], 'image': image,
                                          'width': width, 'height': height}
             instance = {'name': frame['name'], 'x': x, 'y': y}
+            if image is not None:
+                self.images[id(instance)] = image
             if frame.get('origin'):
                 instance['depth'] = frame['origin']['depth']
                 instance['origin'] = frame['origin']
@@ -282,8 +325,8 @@ def assign_initial_depth(layers):
     """Order every layer (groups included) by camera depth.
 
     The farthest layer gets initialDepth 0; nearer layers get higher values,
-    matching psd-to-json where higher = drawn on top. Layers without a depth
-    keep their traversal order and are drawn last.
+    matching psd-to-json where higher = drawn on top. Layers in the holdout
+    collection come first; layers without a depth are drawn last.
     """
     flat = []
 
@@ -293,19 +336,92 @@ def assign_initial_depth(layers):
             collect(item.get('children', []))
 
     collect(layers)
+    # Holdout ("ground") layers always go underneath everything else.
     ordered = sorted(
         enumerate(flat),
-        key=lambda pair: (pair[1].get('depth') is None, -(pair[1].get('depth') or 0), pair[0]))
+        key=lambda pair: (not pair[1].get('holdout'), pair[1].get('depth') is None,
+                          -(pair[1].get('depth') or 0), pair[0]))
     for rank, (_, layer) in enumerate(ordered):
         layer['initialDepth'] = rank
 
 
+def _key(layer):
+    source = layer.get('source') or {}
+    return source.get('kind'), source.get('name')
+
+
+def _find(layers, key):
+    for i, layer in enumerate(layers):
+        if _key(layer) == key:
+            return layers, i
+        found = _find(layer.get('children', []), key)
+        if found:
+            return found
+    return None
+
+
+def merge_layers(existing, new):
+    """Merge a --only export into an existing layer tree.
+
+    Layers marked onlyRoot replace the existing layer that came from the same
+    Blender collection/object (wherever it is), or are added if new. Group
+    containers that were only exported to hold them are matched up with their
+    existing counterparts so the rest of the tree is left untouched.
+    """
+    def place(nodes, siblings):
+        for node in nodes:
+            found = _find(existing, _key(node))
+            if node.get('onlyRoot'):
+                if found:
+                    found[0][found[1]] = node
+                else:
+                    siblings.append(node)
+            elif found:
+                target = found[0][found[1]]
+                place(node.get('children', []), target.setdefault('children', []))
+            else:
+                siblings.append(node)
+
+    place(new, existing)
+    return existing
+
+
+def _strip_flags(layers):
+    for layer in layers:
+        layer.pop('onlyRoot', None)
+        _strip_flags(layer.get('children', []))
+
+
 def post_process(raw, work_dir, output_root):
-    """Write assets and data.json for one blend file; return the output path."""
+    """Write assets and data.json for one blend file; return the output path.
+
+    With --only, the new layers are merged into an existing data.json.
+    """
     layer_dir = os.path.join(output_root, raw['name'])
     os.makedirs(layer_dir, exist_ok=True)
-    data = PostProcessor(raw, work_dir, layer_dir).run()
+    processor = PostProcessor(raw, work_dir, layer_dir)
+    data = processor.run()
     path = os.path.join(layer_dir, 'data.json')
+
+    if raw.get('only') and os.path.isfile(path):
+        with open(path) as f:
+            previous = json.load(f)
+        data['layers'] = merge_layers(previous.get('layers', []), data['layers'])
+        assign_initial_depth(data['layers'])
+        print(f"[blender-to-json] merged {', '.join(raw['only'])} into the existing {path}")
+    _strip_flags(data['layers'])
+
+    if processor.config.get('psd') and not processor.metadata_only:
+        from .psd import write_psd
+        if raw.get('only'):
+            processor.warn('PSD output skipped: --only exports are partial')
+        else:
+            psd_path = write_psd(data, processor.images, os.path.join(layer_dir, f"{raw['name']}.psd"))
+            data['psdPath'] = os.path.relpath(psd_path, layer_dir)
+            print(f"[blender-to-json] wrote {psd_path}")
+    if processor.warnings:
+        data['warnings'] = processor.warnings
+
     with open(path, 'w') as f:
         json.dump(data, f, indent=2)
     return path

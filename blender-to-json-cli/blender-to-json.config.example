@@ -3,7 +3,7 @@
   "blend_files": ["scenes/level1.blend", "scenes/level2.blend"],
   "blender_path": null,
 
-  "camera": "@mainCam",
+  "camera": "@camera",
   "renderBounds": "object",
   "renderPadding": 2,
 

@@ -4,7 +4,7 @@ import os
 from PIL import Image
 
 from blender_to_json.post.packer import pack
-from blender_to_json.post.process import assign_initial_depth, post_process
+from blender_to_json.post.process import assign_initial_depth, merge_layers, post_process
 
 
 def test_pack_no_overlap():
@@ -95,3 +95,70 @@ def test_post_process(tmp_path):
     assert layers['ground']['initialDepth'] == 0  # farthest
     assert layers['spawn']['initialDepth'] == 4   # nearest
     assert data['parameters'] == {'difficulty': 3}
+
+
+def test_holdout_layers_go_to_the_bottom():
+    layers = [{'name': 'far', 'depth': 50.0}, {'name': 'ground', 'depth': 1.0, 'holdout': True}]
+    assign_initial_depth(layers)
+    assert [l['initialDepth'] for l in layers] == [1, 0]
+
+
+def test_merge_layers_replaces_only_roots():
+    existing = [
+        {'name': 'world', 'source': {'kind': 'collection', 'name': 'G | world'}, 'children': [
+            {'name': 'crate', 'source': {'kind': 'object', 'name': 'S | crate'}, 'filePath': 'old'},
+            {'name': 'house', 'source': {'kind': 'collection', 'name': 'S | house'}},
+        ]},
+        {'name': 'ground', 'source': {'kind': 'collection', 'name': 'T | ground'}},
+    ]
+    new = [
+        {'name': 'world', 'source': {'kind': 'collection', 'name': 'G | world'}, 'children': [
+            {'name': 'crate', 'source': {'kind': 'object', 'name': 'S | crate'}, 'filePath': 'new',
+             'onlyRoot': True},
+            {'name': 'barrel', 'source': {'kind': 'object', 'name': 'S | barrel'}, 'onlyRoot': True},
+        ]},
+    ]
+    merged = merge_layers(existing, new)
+    world = merged[0]
+    assert [c['name'] for c in world['children']] == ['crate', 'house', 'barrel']
+    assert world['children'][0]['filePath'] == 'new'
+    assert merged[1]['name'] == 'ground'
+
+
+def test_psd_layer_names_round_trip():
+    from blender_to_json.core.naming import parse_layer_name
+    from blender_to_json.post.psd import layer_name
+
+    for layer in [
+        {'category': 'sprite', 'name': 'props', 'type': 'atlas', 'attributes': {}},
+        {'category': 'point', 'name': 'spawn', 'attributes': {'team': 'red', 'level': 3, 'boss': True,
+                                                             'targets': ['a', 'b']}},
+        {'category': 'tileset', 'name': 'ground', 'type': 'jpg', 'attributes': {'lazyLoad': True}},
+        {'category': 'group', 'name': 'world', 'attributes': {}},
+    ]:
+        parsed = parse_layer_name(layer_name(layer))
+        assert parsed['name'] == layer['name']
+        assert parsed['category'] == layer['category']
+        assert parsed.get('type') == layer.get('type')
+        assert parsed['attributes'] == layer['attributes']
+
+
+def test_dryrun_report():
+    from blender_to_json.report import format_dryrun
+
+    raw = {'name': 'lvl', 'scene': 'Scene', 'width': 200, 'height': 100,
+           'camera': {'name': 'Camera', 'type': 'orthographic'}, 'config': {'tile_slice_size': 64},
+           'parameters': {'difficulty': 3}, 'warnings': ['careful'],
+           'summary': {'layers': 2, 'renders': 1, 'ignored': 1, 'warnings': 0},
+           'layers': [
+               {'status': 'export', 'name': 'ground', 'category': 'tileset',
+                'source': {'name': 'T | ground'}, 'render': {'width': 130, 'height': 64, 'objects': 1},
+                'origin': {'x': 1, 'y': 2, 'depth': 21.0}, 'children': [
+                    {'status': 'content', 'blenderName': 'plane', 'reason': "part of the 'T | ground' render"}]},
+               {'status': 'ignored', 'blenderName': 'helper', 'reason': 'no category'},
+           ]}
+    text = format_dryrun('lvl.blend', raw, '/out')
+    assert "T ground  [T | ground]  render 130x64 (1 object) -> up to 3x1 tiles of 64px, depth 21" in text
+    assert "`- . plane  (part of the 'T | ground' render)" in text
+    assert "`- x helper  -- ignored: no category" in text
+    assert 'warning: careful' in text

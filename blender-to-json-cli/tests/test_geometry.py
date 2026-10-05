@@ -1,4 +1,4 @@
-from blender_to_json.geometry import bounds, convex_hull
+from blender_to_json.core.geometry import bounds, convex_hull
 
 
 def test_square_hull_drops_interior_points():

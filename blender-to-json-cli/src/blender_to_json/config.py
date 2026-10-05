@@ -9,6 +9,7 @@ CONFIG_FILENAME = 'blender-to-json.config'
 DEFAULTS = {
     # Files
     'output_dir': 'output',
+    'name': None,
     'blend_files': [],
     'blender_path': None,
     'factoryStartup': True,
@@ -26,7 +27,15 @@ DEFAULTS = {
     'maxRenderSize': 16384,
     'castShadowsFromHidden': False,
 
+    # Tile tools (ported from blender-2d-tile-tools)
+    'baseTile': None,
+    'tileWidth': None,
+    'snapToTileGrid': False,
+    'holdoutCollection': None,
+    'psd': False,
+
     # Traversal
+    'only': [],
     'ignoreLayers': [],
     'passThroughUnnamedCollections': False,
     'customPropertiesAsAttributes': True,
@@ -96,11 +105,14 @@ def load_config(path=None, sets=(), params=()):
 
     Precedence (lowest to highest): defaults, config file, --set flags.
     `--param` flags are merged into config['parameters'].
-    Returns (config, base_dir) where base_dir is the directory that relative
-    paths in the config are resolved against.
+    Returns (config, base_dir, explicit) where base_dir is the directory that
+    relative paths in the config are resolved against and explicit is the set
+    of top-level keys set by the config file or --set (these take precedence
+    over settings stored in the .blend by the plugin).
     """
     config = copy.deepcopy(DEFAULTS)
     base_dir = os.getcwd()
+    explicit = set()
     if path:
         try:
             with open(path) as f:
@@ -113,11 +125,13 @@ def load_config(path=None, sets=(), params=()):
         if 'files' in user and 'blend_files' not in user:
             user['blend_files'] = user.pop('files')
         config.update(user)
+        explicit.update(user)
         base_dir = os.path.dirname(os.path.abspath(path))
 
     for text in sets:
         key, value = parse_assignment(text, '--set')
         set_dotted(config, key, value)
+        explicit.add(key.split('.')[0])
 
     config['parameters'] = dict(config.get('parameters') or {})
     for text in params:
@@ -126,7 +140,7 @@ def load_config(path=None, sets=(), params=()):
 
     if config.get('renderBounds') not in ('object', 'frame'):
         raise ConfigError("renderBounds must be 'object' or 'frame'")
-    return config, base_dir
+    return config, base_dir, explicit
 
 
 def resolve_path(path, base_dir):

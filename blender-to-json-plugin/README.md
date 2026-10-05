@@ -1,74 +1,100 @@
 # Blender to JSON (plugin)
 
-A Blender add-on that goes with the [blender-to-json CLI](../blender-to-json-cli).
+A Blender add-on that goes with the [blender-to-json CLI](../blender-to-json-cli). It replaces [blender-2d-tile-tools](https://github.com/laffan/blender-2d-tile-tools).
 
-For now it does one thing: it stores **named parameters** in a `.blend` file (a camera, an object, a collection, text, a number or a toggle). You can then refer to them as `@name` from the CLI's config file or command line:
+Everything is in the **Blender to JSON** tab of the 3D Viewport sidebar (press `N`):
 
-```bash
-blender-to-json level1.blend --set camera=@topDown --set tile_slice_size=@tileSize
-```
-
-This lets each `.blend` decide which camera to use, how large its tiles are and so on, while one shared config works for every file.
+| Panel | What it does |
+| --- | --- |
+| **Blender to JSON** | Export, Export Selected, Dry Run, Open Folder, Copy Command. |
+| **Setup** | Create a tile camera (side, top-down, isometric, 2:1 isometric), turn on transparent film. |
+| **Export Settings** | Output folder, camera, base tile and tile width, grid snapping, crop with ground, cast shadows, PSD output… Saved in the `.blend` and used by the CLI too. |
+| **Parameters** | Track any Blender property under a name the CLI can set (`--param`) and read (`@name`). |
+| **Export Preview** | A live, collapsible tree showing how the CLI will parse the scene. |
 
 ## Install
 
-Blender 4.2 and newer (extensions):
+1. Install the CLI (see its README). The plugin runs it to export.
+2. Build the add-on zip:
+
+   ```bash
+   cd blender-to-json-plugin
+   python build.py        # writes dist/blender_to_json_plugin-0.2.0.zip
+   ```
+
+3. In Blender 4.2 or newer: **Edit › Preferences › Get Extensions › ⌄ › Install from Disk…** and pick the zip. In Blender 3.6–4.1: **Edit › Preferences › Add-ons › Install…**.
+4. In the add-on's preferences, set **blender-to-json Command** to the CLI executable, e.g. `/path/to/venv/bin/blender-to-json`. If it's on your `PATH` you can leave this empty. On macOS, Blender started from the Dock doesn't see your shell's `PATH`, so give the full path.
+
+If you used blender-2d-tile-tools, disable it. The two don't conflict, but this one covers the same ground (see the [mapping table](../blender-to-json-cli/README.md#tile-tools-from-blender-2d-tile-tools)).
+
+## Parameters
+
+A parameter is a name attached to one Blender property: the render width, a light's power, the scene camera, a material input, a modifier setting, a custom property. The list shows each property's **live value with its own widget**, so you can see it's being tracked, and edit it right there.
+
+Adding one:
+
+- **Pick Property** (eyedropper button), then click any property field anywhere in Blender: the Properties editor, a node, the sidebar… Esc or right-click cancels.
+- **Right-click any property › Track as Blender to JSON Parameter.**
+- **Paste button**: paste a full data path (hover a property and press `Ctrl+Shift+Alt+C` to copy one), e.g. `bpy.data.lights["Sun"].energy`.
+
+The name is suggested from the property (`resolution_x` → `resolutionX`); rename it to whatever you want to type on the command line. Then:
 
 ```bash
-cd blender-to-json-plugin
-python build.py        # writes dist/blender_to_json_plugin-0.1.0.zip
+blender-to-json level1.blend --param resolutionX=1024     # sets the property for this export
 ```
 
-Then use **Edit › Preferences › Get Extensions › ⌄ › Install from Disk…** and pick the zip.
+```json
+{ "tile_slice_size": "@tileSize", "camera": "@camera" }    // reads its current value
+```
 
-Blender 3.6–4.1: **Edit › Preferences › Add-ons › Install…**, pick the same zip, and enable "Blender to JSON".
+The copy buttons put `"@name"`, or a `--param name=<current value>` flag, on the clipboard. Parameters follow renamed objects and materials. If the tracked datablock is deleted, the row turns red.
 
-For development you can also symlink `blender_to_json_plugin/` into your add-ons (or extensions) folder.
+## Export Preview
 
-## Use
+A tree of the scene's collections and objects, rebuilt every time the panel redraws, using the same code the CLI uses for `--dryrun`:
 
-Open the **Blender to JSON** tab in the 3D Viewport sidebar (press `N`).
+- Each named item shows its category (`G`, `S`, `T`, `P`, `Z`), name, type, whether it gets rendered, and its attributes.
+- Unnamed objects inside a sprite or tile collection are marked *in render*.
+- Everything else that won't be exported is greyed out with the reason (*no category*, *G must be a collection*…). Problems are shown in red.
+- Click a name to select the object or make the collection active. Use the triangles to collapse branches.
+- The checkbox excludes an item from the export. Exclusions are stored with the file (as `ignoreLayers`) and listed under Export Settings.
 
-- **+** adds a parameter. The camera button adds a camera parameter set to the selected camera, or to the scene camera if no camera is selected.
-- Each parameter has a **name** (letters, digits and underscores), a **type** and a **value**, plus an optional description.
-- The copy buttons put `@name`, or a ready-made `--param name=value`, on the clipboard.
-- **Copy CLI Command** (at the top of the panel) copies a `blender-to-json "<this file>"` command line.
+The preview reflects the settings stored in the file. A separate config file can change the result (for example its own `ignoreLayers`); the CLI's `--dryrun` shows the exact outcome.
 
-Problems such as an invalid or duplicate name, or an empty camera/object/collection value, are shown in red in the list.
+## Exporting from Blender
 
-### Referencing parameters from the CLI
+- **Export** renders everything and writes `data.json` to the output folder.
+- **Export Selected** works out which exported layers the selected objects belong to (selecting a wall inside `S | house` exports the house) and runs the CLI with `--only`. The results are merged into the existing `data.json`.
+- **Dry Run** runs `--dryrun` and puts the report in a Text Editor block called *blender-to-json dry run*.
 
-| Where | Example |
-| --- | --- |
-| Config file | `"camera": "@topDown"` |
-| `--set` | `--set camera=@topDown` |
-| Layer attributes | `P | spawn | level:@difficulty`, or a custom property whose value is `"@difficulty"` |
-| Override from the CLI | `--param difficulty=5` |
-| Inspect a file | `blender-to-json level1.blend --list-params` |
-
-Camera, object and collection parameters resolve to the datablock's name. The resolved values are also written to `data.json` under `"parameters"`.
+The export runs in a separate background Blender, so the interface stays usable. Progress shows in the panel, and the running export can be cancelled. If the file has unsaved changes, a temporary copy is exported, so what you see is what gets exported. If the export fails, the full log is put in the same Text Editor block.
 
 ## Where the data lives
 
-The list you edit in the panel belongs to the add-on. The CLI runs Blender without the add-on, so the plugin also writes a plain JSON copy into a scene custom property called `blender_to_json`:
+The panels edit add-on properties. The CLI runs Blender without the add-on, so the plugin also keeps a plain JSON copy in a scene custom property called `blender_to_json`, refreshed whenever you change something and every time the file is saved:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "parameters": {
-    "topDown":  { "type": "CAMERA", "value": "Camera.002" },
-    "tileSize": { "type": "INT",    "value": 256, "description": "Tile size for this level" }
-  }
+    "resolutionX": { "id_type": "scenes", "id_name": "Scene", "path": "render.resolution_x", "value": 1920 },
+    "sunPower":    { "id_type": "lights", "id_name": "Sun", "path": "energy", "value": 3.0 },
+    "level":       { "value": 2 }
+  },
+  "settings": { "output_dir": "//assets", "baseTile": "Tile", "tileWidth": 64 }
 }
 ```
 
-The copy is updated whenever you edit a parameter, and again every time the file is saved, which picks up renamed cameras and objects. **Refresh Stored Parameters** does the same thing by hand.
+`value` is the property's value at the last save, used by `--list-params` and as a fallback if the datablock disappears. Entries with only a `value` are constants; scripts can add them and the plugin keeps them. Only settings you changed from their defaults are written.
 
-The copy is ordinary data, so scripts can write it too. If a file has the JSON property but an empty list (for example, it was written by a script), the plugin fills the list from the JSON when the file is opened.
+## Development
 
-## Tests
+The plugin carries a copy of the CLI's `core` package (naming, export plan, data paths, parameters), so the preview and the CLI always agree. Edit the CLI's copy, then:
 
 ```bash
-pip install bpy pytest   # bpy needs Python 3.11
+python sync_core.py
+pip install bpy pytest pillow   # bpy needs Python 3.11
 pytest tests
 ```
+
+The tests run headless with the `bpy` module. They cover tracking, the JSON copy, renames, the preview tree, camera presets, panel drawing (against a fake layout) and a real export through the CLI. They can't click in a real Blender window, so the eyedropper's click handling and the right-click menu entry are untested. They use Blender's own *Copy Data Path* operator and context menu hook, but please report it if either doesn't pick up a property.

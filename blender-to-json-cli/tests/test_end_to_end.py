@@ -45,6 +45,12 @@ def run(blend_file, fake_blender, out, *extra):
         return json.load(f), out / name
 
 
+def walk(layers):
+    for layer in layers:
+        yield layer
+        yield from walk(layer.get('children', []))
+
+
 def by_name(layers, found=None):
     found = {} if found is None else found
     for layer in layers:
@@ -88,6 +94,68 @@ def test_export(blend_file, fake_blender, tmp_path):
     assert 'warnings' not in data
 
 
+def test_dryrun(blend_file, fake_blender, tmp_path, capsys):
+    code = main([blend_file, '--blender', fake_blender, '-o', str(tmp_path), '--dryrun'])
+    assert code == 0
+    out = capsys.readouterr().out
+    assert 'S house  [S | house]  render' in out
+    assert ". wall  (part of the 'S | house' render)" in out
+    assert 'x helper  -- ignored: no category' in out
+    assert 'Dry run: nothing was rendered or written.' in out
+    assert not any(tmp_path.iterdir())
+
+
+def test_only_merges_into_existing_manifest(blend_file, fake_blender, tmp_path):
+    data, out = run(blend_file, fake_blender, tmp_path)
+    os.remove(out / 'sprites' / 'house.png')
+    first = by_name(data['layers'])
+    first_layers = data['layers']
+
+    data, out = run(blend_file, fake_blender, tmp_path, '--only', 'crate,gems')
+    layers = by_name(data['layers'])
+    assert set(layers) == set(first)                           # nothing dropped
+    assert not os.path.exists(out / 'sprites' / 'house.png')   # house not re-rendered
+    assert os.path.isfile(out / layers['crate']['filePath'])
+    assert all('onlyRoot' not in l for l in layers.values())
+    flat = list(walk(data['layers']))
+    assert len(flat) == len(list(walk(first_layers)))
+    assert sorted(l['initialDepth'] for l in flat) == list(range(len(flat)))
+
+
+def test_param_sets_tracked_property(blend_file, fake_blender, tmp_path):
+    data, _ = run(blend_file, fake_blender, tmp_path, '--param', 'width=400', '--metadata-only')
+    assert data['width'] == 400
+    assert data['parameters']['width'] == 400
+    if 'ortho' in blend_file:
+        assert data['parameters']['mainCam'] == 'Camera'
+        spawn = by_name(data['layers'])['spawn']
+        # 20 units now span 400px (20px/unit); the frame stays 100px tall.
+        assert (spawn['x'], spawn['y']) == (240.0, 10.0)
+
+
+def test_tile_tools_features(blend_file, fake_blender, tmp_path):
+    if 'persp' in blend_file:
+        pytest.skip('grid snapping is meant for orthographic tile cameras')
+    data, out = run(blend_file, fake_blender, tmp_path,
+                    '--set', 'baseTile=BaseTile', '--set', 'tileWidth=32', '--set', 'snapToTileGrid=true',
+                    '--set', 'holdoutCollection="T | ground"', '--set', 'psd=true')
+    layers = by_name(data['layers'])
+    assert data['width'] == 320 and data['height'] == 160  # 2-unit tile: 20px -> 32px
+    assert data['baseTile']['width'] == pytest.approx(32)
+    for name in ('crate', 'house', 'edge'):
+        layer = layers[name]
+        assert layer['width'] % 32 == 0 and layer['height'] % 32 == 0, name
+    crate = layers['crate']  # a tile-sized object snaps to exactly one cell
+    assert (crate['width'], crate['height']) == (32, 32)
+    assert layers['ground']['holdout'] and layers['ground']['initialDepth'] == 0
+
+    from psd_tools import PSDImage
+    psd = PSDImage.open(out / data['psdPath'])
+    names = [layer.name for layer in psd.descendants()]
+    assert 'S | crate | weight:10' in names and 'G | world | level:1' in names
+    assert 'S | props | atlas |' in names
+
+
 def test_metadata_only(blend_file, fake_blender, tmp_path):
     data, out = run(blend_file, fake_blender, tmp_path, '--metadata-only')
     layers = by_name(data['layers'])
@@ -98,4 +166,6 @@ def test_metadata_only(blend_file, fake_blender, tmp_path):
 
 def test_list_params(blend_file, fake_blender, capsys):
     assert main([blend_file, '--blender', fake_blender, '--list-params']) == 0
-    assert '@mainCam' in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert '@mainCam' in out and "scenes['Scene'].camera" in out
+    assert "lights['Sun'].energy" in out

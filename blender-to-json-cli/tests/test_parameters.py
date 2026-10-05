@@ -2,21 +2,31 @@ import json
 
 import pytest
 
-from blender_to_json.blender_stage.parameters import (
-    SCENE_PROPERTY, ParameterError, merge_parameters, read_scene_parameters, resolve_references)
+from blender_to_json.core.parameters import (
+    SCENE_PROPERTY, ParameterError, apply_parameters, is_tracked, read_scene_parameters, read_scene_settings,
+    resolve_references)
 
 
 class FakeScene(dict):
     pass
 
 
-def test_read_and_merge():
-    scene = FakeScene({SCENE_PROPERTY: json.dumps({'version': 1, 'parameters': {
-        'cam': {'type': 'CAMERA', 'value': 'Camera.001'},
-        'size': {'type': 'INT', 'value': 512}}})})
-    params = merge_parameters(read_scene_parameters(scene), {'size': 256, 'extra': True})
-    assert params == {'cam': 'Camera.001', 'size': 256, 'extra': True}
+def test_read_constants_and_settings():
+    scene = FakeScene({SCENE_PROPERTY: json.dumps({'version': 2, 'parameters': {
+        'level': {'value': 2}, 'legacy': 5,
+        'width': {'id_type': 'scenes', 'id_name': 'Scene', 'path': 'render.resolution_x', 'value': 100}},
+        'settings': {'output_dir': '//assets'}})})
+    params = read_scene_parameters(scene)
+    assert params['legacy'] == {'value': 5}
+    assert is_tracked(params['width']) and not is_tracked(params['level'])
+    assert read_scene_settings(scene) == {'output_dir': '//assets'}
     assert read_scene_parameters(FakeScene()) == {}
+
+
+def test_apply_constants_without_bpy():
+    values, problems = apply_parameters({'level': {'value': 2}}, {'level': 4, 'extra': True})
+    assert values == {'level': 4, 'extra': True}
+    assert problems == []
 
 
 def test_resolve_references():

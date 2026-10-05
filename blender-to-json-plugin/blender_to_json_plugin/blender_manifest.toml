@@ -1,9 +1,9 @@
 schema_version = "1.0.0"
 
 id = "blender_to_json"
-version = "0.1.0"
+version = "0.2.0"
 name = "Blender to JSON"
-tagline = "Named parameters for the blender-to-json command-line exporter"
+tagline = "Export collections and objects as 2D game assets with a manifest"
 maintainer = "Nate Laffan <nate.laffan@gmail.com>"
 type = "add-on"
 website = "https://github.com/laffan/blender-to-json"
@@ -14,4 +14,5 @@ blender_version_min = "4.2.0"
 license = ["SPDX:GPL-3.0-or-later"]
 
 [permissions]
-clipboard = "Copy parameter references and CLI commands"
+clipboard = "Pick properties and copy parameter references"
+files = "Export assets and save a temporary copy of the scene to export"

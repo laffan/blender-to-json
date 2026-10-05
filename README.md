@@ -34,18 +34,20 @@ cd blender-to-json-cli && pip install -e .
 #        Z | lake            (plane, can be hidden from render)
 #      T | ground | jpg |    (collection)
 
-# 3. Export
+# 3. Check how it's parsed, then export
+blender-to-json scenes/level1.blend --dryrun
 blender-to-json scenes/level1.blend -o assets
+blender-to-json scenes/level1.blend -o assets --only house   # re-export one asset
 ```
 
-The [Blender to JSON plugin](blender-to-json-plugin) adds named parameters to a `.blend` file (a camera, a collection, numbers and so on). You can refer to them from the CLI as `@name`:
+The [Blender to JSON plugin](blender-to-json-plugin) works inside Blender:
 
-```bash
-blender-to-json scenes/level1.blend --set camera=@topDown --set tile_slice_size=@tileSize
-```
+- **Parameters.** Pick any property with an eyedropper (or right-click it) and give it a name. The CLI can then set it (`--param resolutionX=1024`) or read it (`"camera": "@camera"`).
+- **Export Preview.** A live tree of how the CLI will parse the scene.
+- **Export, Export Selected and Dry Run buttons**, plus the settings and tools from [blender-2d-tile-tools](https://github.com/laffan/blender-2d-tile-tools), which this project replaces: tile camera presets, base tile scaling, grid snapping, crop with ground, cast shadows and PSD output.
 
 See [blender-to-json-cli/README.md](blender-to-json-cli/README.md) for the full configuration reference and output format, and [blender-to-json-plugin/README.md](blender-to-json-plugin/README.md) for the add-on.
 
 ## Credits
 
-The render-isolation approach comes from [blender-2d-tile-tools](https://github.com/laffan/blender-2d-tile-tools). The naming scheme and output format come from [psd-to-json](https://github.com/laffan/psd-to-json).
+The render-isolation approach and the tile features come from [blender-2d-tile-tools](https://github.com/laffan/blender-2d-tile-tools). The naming scheme and output format come from [psd-to-json](https://github.com/laffan/psd-to-json).
