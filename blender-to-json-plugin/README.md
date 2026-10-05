@@ -14,6 +14,10 @@ Everything is in the **Blender to JSON** tab of the 3D Viewport sidebar (press `
 
 ## Install
 
+For development, use [`dev_install.py`](../README.md#development-install) at the repository root instead. It installs the CLI and links this add-on into Blender in one step, and you re-run it after each pull.
+
+To install by hand:
+
 1. Install the CLI (see its README). The plugin runs it to export.
 2. Build the add-on zip:
 
@@ -24,6 +28,10 @@ Everything is in the **Blender to JSON** tab of the 3D Viewport sidebar (press `
 
 3. In Blender 4.2 or newer: **Edit › Preferences › Get Extensions › ⌄ › Install from Disk…** and pick the zip. In Blender 3.6–4.1: **Edit › Preferences › Add-ons › Install…**.
 4. In the add-on's preferences, set **blender-to-json Command** to the CLI executable, e.g. `/path/to/venv/bin/blender-to-json`. If it's on your `PATH` you can leave this empty. On macOS, Blender started from the Dock doesn't see your shell's `PATH`, so give the full path.
+
+**Reset Scripts** (at the bottom of the sidebar tab, and in the add-on preferences) reloads all add-on scripts, the same as Blender's *Reload Scripts*. Use it after pulling changes into a linked install. The add-on drops its cached submodules on reload, so changes anywhere in it (including `core/`) are picked up.
+
+**Uninstall** (in the add-on preferences) disables the add-on and deletes its installed files after a confirmation. If the add-on is a link made by `dev_install.py`, only the link is removed and the source folder is left alone.
 
 If you used blender-2d-tile-tools, disable it. The two don't conflict, but this one covers the same ground (see the [mapping table](../blender-to-json-cli/README.md#tile-tools-from-blender-2d-tile-tools)).
 
@@ -92,9 +100,9 @@ The panels edit add-on properties. The CLI runs Blender without the add-on, so t
 The plugin carries a copy of the CLI's `core` package (naming, export plan, data paths, parameters), so the preview and the CLI always agree. Edit the CLI's copy, then:
 
 ```bash
-python sync_core.py
-pip install bpy pytest pillow   # bpy needs Python 3.11
+python sync_core.py               # dev_install.py does this for you
+pip install bpy pytest pillow     # bpy needs Python 3.11
 pytest tests
 ```
 
-The tests run headless with the `bpy` module. They cover tracking, the JSON copy, renames, the preview tree, camera presets, panel drawing (against a fake layout) and a real export through the CLI. They can't click in a real Blender window, so the eyedropper's click handling and the right-click menu entry are untested. They use Blender's own *Copy Data Path* operator and context menu hook, but please report it if either doesn't pick up a property.
+The tests run headless with the `bpy` module. They cover tracking, the JSON copy, renames, the preview tree, camera presets, panel drawing (against a fake layout), a real export through the CLI, and Reset Scripts and Uninstall on a linked install (in a throwaway Blender home). They can't click in a real Blender window, so the eyedropper's click handling and the right-click menu entry are untested. They use Blender's own *Copy Data Path* operator and context menu hook, but please report it if either doesn't pick up a property.

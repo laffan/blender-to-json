@@ -25,6 +25,7 @@ def main():
                 path = os.path.join(root, name)
                 zf.write(path, os.path.relpath(path, HERE))
     print(out)
+    return out
 
 
 if __name__ == '__main__':

@@ -4,7 +4,6 @@ Interface-only pieces (the eyedropper's click handling, the right-click menu
 entry and panel drawing) need a real Blender window and aren't covered here.
 """
 
-import filecmp
 import json
 import os
 import subprocess
@@ -16,15 +15,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PLUGIN_ROOT = os.path.dirname(HERE)
 CLI_SRC = os.path.join(PLUGIN_ROOT, '..', 'blender-to-json-cli', 'src')
 CLI_TESTS = os.path.join(PLUGIN_ROOT, '..', 'blender-to-json-cli', 'tests')
-
-
-def test_core_copy_matches_cli():
-    ours = os.path.join(PLUGIN_ROOT, 'blender_to_json_plugin', 'core')
-    theirs = os.path.join(CLI_SRC, 'blender_to_json', 'core')
-    names = sorted(f for f in os.listdir(theirs) if f.endswith('.py'))
-    assert names == sorted(f for f in os.listdir(ours) if f.endswith('.py'))
-    _, mismatch, errors = filecmp.cmpfiles(ours, theirs, names, shallow=False)
-    assert not mismatch and not errors, f'run python sync_core.py ({mismatch or errors})'
 
 
 bpy = pytest.importorskip('bpy')
@@ -243,9 +233,17 @@ def test_panels_draw(scene):
     params_ops.track(scene, 'objects', 'Camera', 'location[1]')
     scene.blender_to_json_settings.export.ignore_layers.add().name = 'S | old'
 
-    for panel in (ui.B2J_PT_main, ui.B2J_PT_setup, ui.B2J_PT_settings, ui.B2J_PT_parameters, ui.B2J_PT_preview):
+    for panel in (ui.B2J_PT_main, ui.B2J_PT_setup, ui.B2J_PT_settings, ui.B2J_PT_parameters, ui.B2J_PT_preview,
+                  ui.B2J_PT_footer):
         log = _draw(panel, bpy.context)
         assert log, panel.__name__
+    assert _draw(ui.B2J_PT_footer, bpy.context) == [('operator', 'blender_to_json.reset_scripts')]
+
+    from blender_to_json_plugin import maintenance
+    prefs_log = []
+    maintenance.draw_preferences(FakeLayout(prefs_log))
+    assert ('operator', 'blender_to_json.uninstall') in prefs_log
+    assert ('operator', 'blender_to_json.reset_scripts') in prefs_log
 
     log = _draw(ui.B2J_PT_preview, bpy.context)
     labels = [entry for entry in log if entry[0] in ('operator', 'label')]

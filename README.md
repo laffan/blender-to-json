@@ -4,6 +4,7 @@ Export a Blender scene as 2D game assets plus a JSON manifest. This is the Blend
 
 ```
 README.md
+dev_install.py            installs both from this checkout (run after every pull)
 blender-to-json-cli/      command-line exporter (Python package: blender-to-json)
 blender-to-json-plugin/   companion Blender add-on
 ```
@@ -47,6 +48,37 @@ The [Blender to JSON plugin](blender-to-json-plugin) works inside Blender:
 - **Export, Export Selected and Dry Run buttons**, plus the settings and tools from [blender-2d-tile-tools](https://github.com/laffan/blender-2d-tile-tools), which this project replaces: tile camera presets, base tile scaling, grid snapping, crop with ground, cast shadows and PSD output.
 
 See [blender-to-json-cli/README.md](blender-to-json-cli/README.md) for the full configuration reference and output format, and [blender-to-json-plugin/README.md](blender-to-json-plugin/README.md) for the add-on.
+
+## Development install
+
+Run this after cloning and after every `git pull`:
+
+```bash
+python3 dev_install.py            # add --test to also run both test suites
+```
+
+It needs Python 3.9+ and Blender. It finds Blender the same way the CLI does; pass `--blender /path/to/blender` if it can't. Each run:
+
+1. installs the CLI in editable mode into `.venv/` in this folder (created on the first run), with the PSD and test extras,
+2. refreshes the plugin's copy of the shared `core/` code,
+3. runs Blender in the background with your normal preferences to **link** the plugin folder into Blender's add-ons (`extensions/user_default/blender_to_json`, or `scripts/addons` before Blender 4.2), enable it, point its *blender-to-json Command* preference at `.venv`, and save your preferences.
+
+Because the plugin is linked rather than copied, pulled changes only need **Reset Scripts** (bottom of the Blender to JSON tab, or in the add-on preferences) or a Blender restart. Re-running the script after a pull is still worthwhile, because it picks up new Python dependencies and keeps the core copy in sync.
+
+**Quit Blender before the first run.** An open Blender saves its own preferences when it quits, and that would undo the add-on being enabled. Later runs are fine with Blender open.
+
+Options:
+
+| Flag | |
+| --- | --- |
+| `--test` | Run the CLI and plugin test suites afterwards. The Blender-backed tests need `pip install bpy` in `.venv` (Python 3.11) and are skipped otherwise. |
+| `--copy` | Install the built zip instead of linking, to test the packaged add-on. |
+| `--blender PATH` | Blender executable to install into. |
+| `--venv PATH` | Use another virtualenv for the CLI. |
+| `--skip-cli` / `--skip-plugin` | Only do one half. |
+| `--uninstall` | Remove the plugin from Blender and delete `.venv`. |
+
+To uninstall from inside Blender, use **Uninstall** in the add-on's preferences. For a linked install it only removes the link; your checkout is never deleted.
 
 ## Credits
 

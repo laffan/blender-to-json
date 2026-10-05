@@ -17,9 +17,17 @@ bl_info = {
     'category': 'Import-Export',
 }
 
-from . import export_ops, params_ops, preview, properties, sync, ui  # noqa: E402
+if '_modules' in globals():
+    # Reloaded by "Reset Scripts" (or Blender's Reload Scripts): drop the
+    # cached submodules so the imports below pick up changed files.
+    import sys
+    for _name in [n for n in sys.modules if n.startswith(__name__ + '.')]:
+        del sys.modules[_name]
+        globals().pop(_name[len(__name__) + 1:].split('.')[0], None)
 
-_modules = (properties, sync, params_ops, preview, export_ops, ui)
+from . import export_ops, maintenance, params_ops, preview, properties, sync, ui  # noqa: E402
+
+_modules = (properties, sync, params_ops, preview, export_ops, maintenance, ui)
 
 
 def register():

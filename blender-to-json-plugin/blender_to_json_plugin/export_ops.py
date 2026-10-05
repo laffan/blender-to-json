@@ -373,6 +373,8 @@ class B2J_Preferences(bpy.types.AddonPreferences):
         else:
             layout.label(text='blender-to-json not found on PATH. Install it and point to it here.', icon='ERROR')
             layout.label(text='macOS apps launched from the Dock don\'t see your shell PATH, so set the full path.')
+        from . import maintenance
+        maintenance.draw_preferences(layout)
 
 
 classes = (B2J_OT_export, B2J_OT_cancel, B2J_OT_open_folder, B2J_OT_copy_command, B2J_OT_create_camera,

@@ -211,7 +211,19 @@ class B2J_PT_preview(_SidebarPanel, bpy.types.Panel):
         hint.label(text='Checkbox: include/exclude. Click a name to select it.')
 
 
-classes = (B2J_PT_main, B2J_PT_setup, B2J_PT_settings, B2J_UL_parameters, B2J_PT_parameters, B2J_PT_preview)
+class B2J_PT_footer(_SidebarPanel, bpy.types.Panel):
+    """Kept last so it sits at the bottom of the tab."""
+    bl_idname = 'B2J_PT_footer'
+    bl_label = ''
+    bl_parent_id = 'B2J_PT_main'
+    bl_options = {'HIDE_HEADER'}
+
+    def draw(self, context):
+        self.layout.operator('blender_to_json.reset_scripts', icon='FILE_REFRESH')
+
+
+classes = (B2J_PT_main, B2J_PT_setup, B2J_PT_settings, B2J_UL_parameters, B2J_PT_parameters, B2J_PT_preview,
+           B2J_PT_footer)
 
 
 def register():
